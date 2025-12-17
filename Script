@@ -1,0 +1,743 @@
+local Library = loadstring(game:HttpGetAsync("https://github.com/ActualMasterOogway/Fluent-Renewed/releases/latest/download/Fluent.luau"))()
+local SaveManager = loadstring(game:HttpGet("https://raw.githubusercontent.com/bigbeanscripts/Pet-Warriors/refs/heads/main/test"))()
+local InterfaceManager = loadstring(game:HttpGetAsync("https://raw.githubusercontent.com/ActualMasterOogway/Fluent-Renewed/master/Addons/InterfaceManager.luau"))()
+
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Workspace = game:GetService("Workspace")
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+local Common = require(ReplicatedStorage.Modules.Common)
+local UI = require(ReplicatedStorage.Modules.UI)
+local Client = require(ReplicatedStorage.Modules.Client)
+
+-- // PERSISTENT HOOK STORAGE //
+if not getgenv().OriginalPowerPopup then
+    if UI and UI.Popup and UI.Popup.CreatePowerPopup then
+        getgenv().OriginalPowerPopup = UI.Popup.CreatePowerPopup
+    end
+end
+
+if not getgenv().OriginalWinsPopup then
+    if UI and UI.Popup then getgenv().OriginalWinsPopup = UI.Popup.CreateWinsPopup end
+end
+if not getgenv().OriginalConfetti then
+    if Client and Client.Confetti then getgenv().OriginalConfetti = Client.Confetti.Play end
+end
+
+local Window = Library:Window{
+    Title = "Kayak Racing",
+    SubTitle = "By Ducky",
+    TabWidth = 160,
+    Size = UDim2.fromOffset(580, 460),
+    Resize = false,
+    Theme = "Darker",
+    MinimizeKey = Enum.KeyCode.LeftShift
+}
+
+local Tabs = {
+    Main = Window:AddTab({ Title = "Main", Icon = "crown" }),
+    Settings = Window:AddTab({ Title = "Settings", Icon = "settings" })
+}
+
+local function GetStat(name)
+    if LocalPlayer:FindFirstChild("leaderstats") and LocalPlayer.leaderstats:FindFirstChild(name) then
+        return LocalPlayer.leaderstats[name].Value
+    end
+    -- Fallback to Client module if leaderstats fail
+    if name == "Wins" then return Client.Wins.Get() end
+    return Client.Data[name] or 0
+end
+
+local MainSection = Tabs.Main:AddSection("Auto Farm")
+
+-- // LOGIC VARIABLES //
+local spamThread = nil
+local cleanupThread = nil
+local currentTargetLayout = nil
+local currentTargetPowerGain = -1
+local currentTargetRequirement = -1
+local targetUpdateInterval = 5 
+local lastTargetUpdateTime = 0
+
+-- // CLEANUP FUNCTION //
+local function cleanupRequests()
+    collectgarbage("count")
+    pcall(function()
+        local temp = Common.Events.Train
+        task.wait(0.01)
+    end)
+end
+
+-- // FIND BEST TRAINING SPOT //
+local function FindBestTrainingSpot()
+    local myPower = Client.Data.MaxPower
+    local bestSpotLayout = nil
+    local highestGain = -1
+    local requirementForBest = -1
+    
+    local trainFolder = Workspace.WorldMain:FindFirstChild("Train")
+    if not trainFolder then return nil end
+
+    for _, machine in pairs(trainFolder:GetChildren()) do
+        local layout = machine:GetAttribute("Layout")
+        if layout then
+            local data = Common.Config.World.GetTrainData(layout, UI.Teleport.GetSpawn())
+            if data then
+                local powerGain = data.Power
+                local powerNeed = data.PowerNeed
+
+                -- Check if we can afford it AND if it's better than current best
+                if myPower >= powerNeed and powerGain > highestGain then
+                    highestGain = powerGain
+                    bestSpotLayout = layout
+                    requirementForBest = powerNeed
+                end
+            end
+        end
+    end
+    
+    return bestSpotLayout, highestGain, requirementForBest
+end
+
+
+
+MainSection:Paragraph("Note", {
+    Title = "Note",
+    Content = "To get the best results for auto win, enable the teleport to best world option. Popups won't appear for training/wins, but you will be getting them insanely fast."
+})
+
+local AutoTrain = MainSection:Toggle("AutoTrain", {
+    Title = "Auto Train (OP)",
+})
+
+AutoTrain:OnChanged(function()
+    if AutoTrain.Value then
+        if UI and UI.Popup then
+            UI.Popup.CreatePowerPopup = function(...) return nil end
+        end
+
+        -- Initialize target on toggle ON
+        currentTargetLayout, currentTargetPowerGain, currentTargetRequirement = FindBestTrainingSpot()
+        lastTargetUpdateTime = tick()
+
+        spamThread = task.spawn(function()
+            while AutoTrain.Value do
+                -- Re-evaluate best target every X seconds
+                if tick() - lastTargetUpdateTime >= targetUpdateInterval then
+                    currentTargetLayout, currentTargetPowerGain, currentTargetRequirement = FindBestTrainingSpot()
+                    lastTargetUpdateTime = tick()
+                end
+
+                if currentTargetLayout then
+                    -- Spawn spam threads
+                    task.spawn(function()
+                        for i = 1, 100 do
+                            if not AutoTrain.Value then break end
+                            pcall(function()
+                                -- Use the dynamically found target layout
+                                Common.Events.Train:Fire(true, "Power", currentTargetLayout) 
+                            end)
+                        end
+                    end)
+                end
+                
+                task.wait() -- Minimal yield for max speed
+            end
+        end)
+
+        cleanupThread = task.spawn(function()
+            while AutoTrain.Value do
+                task.wait(2) -- Clean memory every 2 seconds
+                cleanupRequests()
+            end
+        end)
+
+    else
+        if spamThread then task.cancel(spamThread) spamThread = nil end
+        if cleanupThread then task.cancel(cleanupThread) cleanupThread = nil end
+
+        if UI and UI.Popup and getgenv().OriginalPowerPopup then
+            UI.Popup.CreatePowerPopup = getgenv().OriginalPowerPopup
+        end
+
+        cleanupRequests()
+    end
+end)
+
+
+local winThread = nil
+
+local AutoWins = MainSection:Toggle("AutoWins", {
+    Title = "Auto Wins (OP)",
+    Default = false
+})
+
+AutoWins:OnChanged(function()
+    if AutoWins.Value then
+        -- Block Visuals
+        if UI and UI.Popup then UI.Popup.CreateWinsPopup = function(...) return nil end end
+        if Client and Client.Confetti then Client.Confetti.Play = function(...) return nil end end
+
+        winThread = task.spawn(function()
+            local togglePos = true
+            while AutoWins.Value do
+                pcall(function()
+                    local char = LocalPlayer.Character
+                    local root = char and char:FindFirstChild("HumanoidRootPart")
+                    
+                    local stage17 = workspace:FindFirstChild("Track") and workspace.Track:FindFirstChild("Stage17") and workspace.Track.Stage17:FindFirstChild("Sign")
+                    local stage18 = workspace:FindFirstChild("Track") and workspace.Track:FindFirstChild("Stage18") and workspace.Track.Stage18:FindFirstChild("Sign")
+
+                    if root and stage17 and stage18 then
+                        if togglePos then
+                            root.CFrame = stage17.CFrame * CFrame.new(0, 5, 0)
+                        else
+                            root.CFrame = stage18.CFrame * CFrame.new(0, 5, 0)
+                        end
+                        togglePos = not togglePos
+                    end
+                end)
+                task.wait() 
+            end
+        end)
+    else
+        if winThread then task.cancel(winThread) winThread = nil end
+        
+        if UI and UI.Popup and getgenv().OriginalWinsPopup then
+            UI.Popup.CreateWinsPopup = getgenv().OriginalWinsPopup
+        end
+        if Client and Client.Confetti and getgenv().OriginalConfetti then
+            Client.Confetti.Play = getgenv().OriginalConfetti
+        end
+    end
+end)
+
+
+local HatchSection = Tabs.Main:AddSection("Eggs")
+local PetConfig = require(game:GetService("ReplicatedStorage").Config.Pet)
+local Common = require(game:GetService("ReplicatedStorage").Modules.Common)
+local Teleport = require(game:GetService("ReplicatedStorage").Modules.UI.Teleport)
+
+local function abbreviateNumber(n)
+    local abs = math.abs(n)
+    if abs >= 1e18 then return string.format("%.2fSx", n/1e18):gsub("%.00", "") elseif abs >= 1e15 then return string.format("%.2fQn", n/1e15):gsub("%.00", "") elseif abs >= 1e12 then return string.format("%.2fQd", n/1e12):gsub("%.00", "") elseif abs >= 1e9 then return string.format("%.2fB", n/1e9):gsub("%.00", "") elseif abs >= 1e6 then return string.format("%.2fM", n/1e6):gsub("%.00", "") elseif abs >= 1e3 then return string.format("%.2fK", n/1e3):gsub("%.00", "") else return tostring(n) end
+end
+
+local function getEggsForZone(zoneId)
+    local eggList = {}
+    for drawId, drawData in pairs(PetConfig.Lotterys) do
+        if drawData.WorldId == zoneId then
+            table.insert(eggList, {id = drawId, price = drawData.Price})
+        end
+    end
+    table.sort(eggList, function(a, b) return a.price < b.price end)
+    
+    local eggOptions = {}
+    local eggIdToDisplay = {}
+    for _, egg in ipairs(eggList) do
+        local friendlyName = egg.id:gsub("Draw", "Draw")
+        local display = string.format("%s (%s Wins)", friendlyName, abbreviateNumber(egg.price))
+        table.insert(eggOptions, display)
+        eggIdToDisplay[display] = egg.id
+    end
+    
+    return eggOptions, eggIdToDisplay
+end
+
+local currentZone = Teleport.GetSpawn()
+local eggOptions, eggIdToDisplay = getEggsForZone(currentZone)
+
+-- Ensure we have at least one egg option
+if #eggOptions == 0 then
+    eggOptions = {"No eggs available"}
+    eggIdToDisplay["No eggs available"] = nil
+end
+
+local selectedEggId = eggIdToDisplay[eggOptions[1]]
+local initialPetOptions = {}
+local autoDeletePetIdMap = {}
+
+if selectedEggId then
+    local initialLot = PetConfig.Lotterys[selectedEggId]
+    if initialLot then
+        for _, pet in ipairs(initialLot.Probability) do
+            local petData = PetConfig.Data[pet.Id]
+            if petData then
+                local display = string.format("%s (%.2f%%)", petData.PetName, pet.Rate / 1000)
+                table.insert(initialPetOptions, display)
+                autoDeletePetIdMap[display] = pet.Id
+            end
+        end
+    end
+end
+
+local selectedAutoDeletePets = {}
+local AutoDeleteDropdown
+local EggDropdown
+local savedEggSelections = {} -- Store selections per zone
+
+local function updateAutoDeleteDropdown(eggId)
+    if not eggId then return end
+    
+    local lot = PetConfig.Lotterys[eggId]
+    local newPetOptions = {}
+    autoDeletePetIdMap = {} 
+    if lot then
+        for _, pet in ipairs(lot.Probability) do
+            local petData = PetConfig.Data[pet.Id]
+            if petData then
+                local display = string.format("%s (%.2f%%)", petData.PetName, pet.Rate / 1000)
+                table.insert(newPetOptions, display)
+                autoDeletePetIdMap[display] = pet.Id
+            end
+        end
+    end
+    
+    -- Only update if dropdown exists and is valid
+    if AutoDeleteDropdown and typeof(AutoDeleteDropdown) == "table" then
+        pcall(function()
+            AutoDeleteDropdown:SetValues(newPetOptions)
+            AutoDeleteDropdown:SetValue({})
+        end)
+    end
+end
+
+local function updateEggDropdown(zoneId)
+    local newEggOptions, newEggIdToDisplay = getEggsForZone(zoneId)
+    
+    -- Ensure we have at least one option
+    if #newEggOptions == 0 then
+        newEggOptions = {"No eggs available"}
+        newEggIdToDisplay["No eggs available"] = nil
+    end
+    
+    eggIdToDisplay = newEggIdToDisplay
+    
+    -- Only update if dropdown exists and has valid options
+    if EggDropdown and typeof(EggDropdown) == "table" and #newEggOptions > 0 then
+        pcall(function()
+            -- Update dropdown title with current zone
+            if EggDropdown.SetTitle then
+                EggDropdown:SetTitle("Select Egg (Zone: " .. tostring(zoneId) .. ")")
+            end
+            
+            EggDropdown:SetValues(newEggOptions)
+            
+            -- Check if we have a saved selection for this zone
+            local savedSelection = savedEggSelections[zoneId]
+            if savedSelection and eggIdToDisplay[savedSelection] then
+                EggDropdown:SetValue(savedSelection)
+                selectedEggId = eggIdToDisplay[savedSelection]
+            else
+                -- No saved selection, clear the dropdown
+                EggDropdown:SetValue(nil)
+                selectedEggId = nil
+            end
+            
+            if selectedEggId then
+                updateAutoDeleteDropdown(selectedEggId)
+            end
+        end)
+    end
+end
+
+EggDropdown = HatchSection:Dropdown("SelectEgg", {
+    Title = "Select Egg (Zone: " .. tostring(currentZone) .. ")",
+    Values = eggOptions,
+    Default = eggOptions[1],
+    Multi = false,
+    Searchable = true,
+    Callback = function(selected)
+        selectedEggId = eggIdToDisplay[selected]
+        if selectedEggId then
+            updateAutoDeleteDropdown(selectedEggId)
+        end
+    end
+})
+
+-- Zone monitoring loop with error handling
+local lastZone = currentZone
+task.spawn(function()
+    while true do
+        pcall(function()
+            local newZone = Teleport.GetSpawn()
+            if newZone and newZone ~= lastZone then
+                lastZone = newZone
+                updateEggDropdown(newZone)
+            end
+        end)
+        task.wait(1)
+    end
+end)
+
+AutoDeleteDropdown = HatchSection:Dropdown("AutoDelete", {
+    Title = "Auto Delete",
+    Values = initialPetOptions,
+    Default = {},
+    Multi = true,
+    Searchable = true,
+    Callback = function(selected)
+        selectedAutoDeletePets = {}
+        for displayName, isSelected in pairs(selected) do
+            if isSelected then
+                local id = autoDeletePetIdMap[displayName]
+                if id then
+                    selectedAutoDeletePets[id] = true
+                end
+            end
+        end
+    end
+})
+
+local hatchAmountMap = { ["1x"] = "Hatch1", ["3x"] = "Hatch3" }
+local hatchAmountOptions = {"1x", "3x"}
+local selectedHatchAmount = hatchAmountMap[hatchAmountOptions[1]]
+
+local HatchAmountDropdown = HatchSection:Dropdown("HatchAmount", {
+    Title = "Hatch Amount",
+    Values = hatchAmountOptions,
+    Default = hatchAmountOptions[1],
+    Description = "For 3x, you will need to own the gamepass.",
+    Multi = false,
+    Callback = function(value)
+        selectedHatchAmount = hatchAmountMap[value]
+    end
+})
+
+--[[
+local hideHatchAnimation = false
+local HideHatchToggle = HatchSection:Toggle("HideHatchAnimation", {
+    Title = "Hide Hatch Animation",
+    Default = false,
+    Callback = function(value)
+        hideHatchAnimation = value
+        local ReplicatedStorage = game:GetService("ReplicatedStorage")
+        local HatchModule = ReplicatedStorage.Modules.Client.Hatch
+        local ShowInfoUIModule = require(HatchModule:WaitForChild("ShowInfoUI"))
+        for k in pairs(ShowInfoUIModule) do ShowInfoUIModule[k] = nil end
+        setmetatable(ShowInfoUIModule, { __index = function() return function() end end })
+        local HatchEffectModule = require(HatchModule:WaitForChild("HatchEffect"))
+        HatchEffectModule.ShowHero = function() end
+        HatchEffectModule.ShakeChest = function() end
+        local MainHatchModule = require(HatchModule)
+        MainHatchModule.HideScreenGui = function() end
+    end
+})
+]]
+
+local autoHatch = false
+local AutoHatchToggle = HatchSection:Toggle("AutoHatch", {
+    Title = "Auto Hatch",
+    Default = false,
+    Callback = function(value)
+        autoHatch = value
+        if value then
+            task.spawn(function()
+                while autoHatch do
+                    local deleteList = {}
+                    for petId, _ in pairs(selectedAutoDeletePets) do
+                        table.insert(deleteList, petId)
+                    end
+                    
+                    Common.Events.Hatch:Fire(true, selectedHatchAmount, selectedEggId, deleteList)
+                    task.wait(0.5)
+                end
+            end)
+        end
+    end
+})
+
+
+local RebirthSection = Tabs.Main:AddSection("Rebirth")
+
+local rebirthThread = nil
+
+local AutoRebirth = RebirthSection:Toggle("AutoRebirth", {
+    Title = "Auto Rebirth",
+    Default = false
+})
+
+AutoRebirth:OnChanged(function()
+    if AutoRebirth.Value then
+        rebirthThread = task.spawn(function()
+            while AutoRebirth.Value do
+                pcall(function()
+                    Common.Events.RebirthUp:Fire(true)
+                end)
+                task.wait(0.25)
+            end
+        end)
+    else
+        if rebirthThread then task.cancel(rebirthThread) rebirthThread = nil end
+    end
+end)
+
+
+local BuySection = Tabs.Main:AddSection("Auto Buy")
+
+-- // AUTO BUY & EQUIP TRAILS //
+local autoBuyTrailThread = nil
+
+local AutoBuyTrails = BuySection:Toggle("AutoBuyTrails", {
+    Title = "Auto Buy/Equip Best Trail",
+    Description = "Checks for better trails and buys and equips them if possible.",
+    Default = false
+})
+
+AutoBuyTrails:OnChanged(function()
+    if AutoBuyTrails.Value then
+        autoBuyTrailThread = task.spawn(function()
+            while AutoBuyTrails.Value do
+                pcall(function()
+                    local myWins = GetStat("Wins")
+                    local ownedTrails = Client.Data.Trails or {}
+                    local trailConfig = Common.Config.Trail.Data
+                    
+                    -- 1. Find the stats of the BEST trail you OWN
+                    local bestOwnedBuff = 0
+                    for _, id in pairs(ownedTrails) do
+                        local data = trailConfig[id]
+                        if data and data.WinBuff > bestOwnedBuff then
+                            bestOwnedBuff = data.WinBuff
+                        end
+                    end
+
+                    -- 2. AUTO BUY LOGIC: Find a trail that's better than your BEST OWNED trail
+                    local bestUnownedTrailId = nil
+                    local bestUnownedBuff = bestOwnedBuff -- Must be better than the best you already have
+
+                    for id, data in pairs(trailConfig) do
+                        if data.Type == 1 and not table.find(ownedTrails, id) then
+                            if myWins >= data.Price and data.WinBuff > bestUnownedBuff then
+                                bestUnownedBuff = data.WinBuff
+                                bestUnownedTrailId = id
+                            end
+                        end
+                    end
+
+                    if bestUnownedTrailId then
+                        Common.Events.Trail:Fire(true, "Purchase", bestUnownedTrailId)
+                        task.wait(0.5) -- Small delay to allow purchase to process
+                        ownedTrails = Client.Data.Trails or {} 
+                    end
+
+                    -- 3. AUTO EQUIP LOGIC: Find and equip the best trail you own
+                    local bestOverallOwnedId = nil
+                    local bestOverallOwnedBuff = -1 -- Start at -1 to ensure any trail is selected initially
+
+                    for _, id in pairs(ownedTrails) do
+                        local data = trailConfig[id]
+                        if data then
+                            if data.WinBuff > bestOverallOwnedBuff then
+                                bestOverallOwnedBuff = data.WinBuff
+                                bestOverallOwnedId = id
+                            elseif data.WinBuff == bestOverallOwnedBuff then
+                                -- Tiebreaker: Acceleration
+                                local currentBestData = trailConfig[bestOverallOwnedId]
+                                if currentBestData and data.AccBuff > currentBestData.AccBuff then
+                                    bestOverallOwnedId = id
+                                end
+                            end
+                        end
+                    end
+                    
+                    -- Equip if a best trail is found and it's not currently equipped
+                    local currentEquippedId = Client.Data.TrailId
+                    if bestOverallOwnedId and bestOverallOwnedId ~= currentEquippedId then
+                        Common.Events.Trail:Fire(true, "Equip", bestOverallOwnedId)
+                    end
+                end)
+                task.wait(5)
+            end
+        end)
+    else
+        if autoBuyTrailThread then task.cancel(autoBuyTrailThread) autoBuyTrailThread = nil end
+    end
+end)
+
+-- // AUTO BUY & EQUIP MOUNTS //
+local autoBuyMountThread = nil
+
+local AutoBuyMounts = BuySection:Toggle("AutoBuyMounts", {
+    Title = "Auto Buy/Equip Best Mount",
+    Description = "Checks for better mounts every 5 seconds. Buys and Equips if possible.",
+    Default = false
+})
+
+AutoBuyMounts:OnChanged(function()
+    if AutoBuyMounts.Value then
+        autoBuyMountThread = task.spawn(function()
+            while AutoBuyMounts.Value do
+                pcall(function()
+                    local myWins = GetStat("Wins")
+                    local ownedMounts = Client.Data.Mounts or {}
+                    local mountConfig = Common.Config.Mount.Data
+                    
+                    local function GetMountValue(data)
+                        return data.Speed or data.Power or data.Price or 0
+                    end
+
+                    -- 1. Find the value of the BEST mount you OWN
+                    local bestOwnedValue = 0
+                    for k, v in pairs(ownedMounts) do
+                        local id = (type(k) == "string") and k or v
+                        local data = mountConfig[id]
+                        if data then
+                            local val = GetMountValue(data)
+                            if val > bestOwnedValue then
+                                bestOwnedValue = val
+                            end
+                        end
+                    end
+
+                    -- 2. AUTO BUY: Find a mount that's better than your BEST OWNED mount
+                    local bestUnownedId = nil
+                    local bestUnownedValue = bestOwnedValue -- Must be better than the best you already have
+
+                    for id, data in pairs(mountConfig) do
+                        if data.Type == 1 and not table.find(ownedMounts, id) and not ownedMounts[id] then
+                            if myWins >= (data.Price or math.huge) and GetMountValue(data) > bestUnownedValue then
+                                bestUnownedValue = GetMountValue(data)
+                                bestUnownedId = id
+                            end
+                        end
+                    end
+
+                    if bestUnownedId then
+                        Common.Events.Mount:Fire(true, "Purchase", bestUnownedId)
+                        task.wait(0.5) 
+                        ownedMounts = Client.Data.Mounts or {} 
+                    end
+
+                    -- 3. AUTO EQUIP: Find and equip the best mount you own
+                    local bestOverallOwnedId = nil
+                    local bestOverallOwnedValue = -1 -- Start at -1
+
+                    for k, v in pairs(ownedMounts) do
+                        local id = (type(k) == "string") and k or v
+                        local data = mountConfig[id]
+                        if data then
+                            local val = GetMountValue(data)
+                            if val > bestOverallOwnedValue then
+                                bestOverallOwnedValue = val
+                                bestOverallOwnedId = id
+                            end
+                        end
+                    end
+                    
+                    -- Equip if a best mount is found and it's not currently equipped
+                    local currentEquippedId = Client.Data.MountId
+                    if bestOverallOwnedId and bestOverallOwnedId ~= currentEquippedId then
+                        Common.Events.Mount:Fire(true, "Equip", bestOverallOwnedId)
+                    end
+                end)
+                task.wait(5)
+            end
+        end)
+    else
+        if autoBuyMountThread then task.cancel(autoBuyMountThread) autoBuyMountThread = nil end
+    end
+end)
+
+local WorldSection = Tabs.Main:AddSection("Worlds")
+
+local buyWorldThread = nil
+
+local AutoBuyWorlds = WorldSection:Toggle("AutoBuyWorlds", {
+    Title = "Auto Buy Worlds",
+    Description = "Unlocks the next world when you can afford it.",
+    Default = false
+})
+
+AutoBuyWorlds:OnChanged(function()
+    if AutoBuyWorlds.Value then
+        buyWorldThread = task.spawn(function()
+            while AutoBuyWorlds.Value do
+                pcall(function()
+                    -- 1. Find the next locked world
+                    local unlockedWorlds = Client.Data.Worlds or {}
+                    local bestOrder = 0
+                    
+                    for _, worldId in pairs(unlockedWorlds) do
+                        local order = tonumber(string.match(worldId, "World(%d+)"))
+                        if order and order > bestOrder then
+                            bestOrder = order
+                        end
+                    end
+                    
+                    local nextWorldId = string.format("World%03d", bestOrder + 1)
+                    local worldData = Common.Config.World.Data[nextWorldId]
+                    
+                    -- 2. Check if it exists and if we can afford it
+                    if worldData then
+                        local myWins = GetStat("Wins")
+                        local myRebirths = GetStat("Rebirth")
+                        
+                        if myWins >= worldData.NeedWins and myRebirths >= worldData.NeedRebirth then
+                            Common.Events.DataEvent:Fire(true, "UnlockWorld")
+                        end
+                    end
+                end)
+                task.wait(3) -- Check every 3 seconds
+            end
+        end)
+    else
+        if buyWorldThread then task.cancel(buyWorldThread) buyWorldThread = nil end
+    end
+end)
+
+
+local autoTeleportThread = nil
+
+local AutoTeleport = WorldSection:Toggle("AutoTeleport", {
+    Title = "Auto Teleport (Best World)",
+    Description = "Automatically teleports you to your highest unlocked world.",
+    Default = false
+})
+
+AutoTeleport:OnChanged(function()
+    if AutoTeleport.Value then
+        autoTeleportThread = task.spawn(function()
+            while AutoTeleport.Value do
+                pcall(function()
+                    -- 1. Find Best World ID
+                    local unlockedWorlds = Client.Data.Worlds or {}
+                    local bestOrder = 0
+                    local bestWorldId = "World001"
+
+                    for _, worldId in pairs(unlockedWorlds) do
+                        local order = tonumber(string.match(worldId, "World(%d+)"))
+                        if order and order > bestOrder then
+                            bestOrder = order
+                            bestWorldId = worldId
+                        end
+                    end
+
+                    -- 2. Get Current World ID
+                    local currentWorldId = UI.Teleport.GetSpawn()
+
+                    -- 3. Teleport if needed
+                    if currentWorldId ~= bestWorldId then
+                        UI.Teleport.TeleportTo(bestWorldId)
+                    end
+                end)
+                task.wait(5) -- Check every 5 seconds
+            end
+        end)
+    else
+        if autoTeleportThread then task.cancel(autoTeleportThread) autoTeleportThread = nil end
+    end
+end)
+
+-- // UI SETUP //
+SaveManager:SetLibrary(Library)
+InterfaceManager:SetLibrary(Library)
+SaveManager:IgnoreThemeSettings()
+SaveManager:SetIgnoreIndexes{}
+InterfaceManager:SetFolder("FluentScriptHub")
+SaveManager:SetFolder("FluentScriptHub/KayakRacing")
+InterfaceManager:BuildInterfaceSection(Tabs.Settings)
+SaveManager:BuildConfigSection(Tabs.Settings)
+Window:SelectTab(1)
+SaveManager:LoadAutoloadConfig()
